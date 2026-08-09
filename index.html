@@ -1,0 +1,429 @@
+
+<!DOCTYPE html>
+<html lang="lv">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Meža ugunsgrēka simulācija</title>
+<style>
+body{font-family:Arial,sans-serif;margin:20px;background:#f4f4f4;color:#222}
+h1{margin-bottom:8px}
+.layout{display:grid;grid-template-columns:minmax(620px,1fr) 360px;gap:20px;align-items:start}
+.panel{background:#fff;padding:16px;border:1px solid #ccc;border-radius:8px}
+canvas{border:1px solid #333;background:#eee;width:100%;max-width:800px;image-rendering:pixelated}
+.controls label{display:block;margin:10px 0 4px;font-weight:600}
+.controls input[type=range],.controls select,.controls input[type=number]{width:100%}
+.buttons{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+button{padding:8px 12px;cursor:pointer}
+.stat{margin:5px 0}
+.legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;font-size:14px}
+.legend span::before{content:"";display:inline-block;width:12px;height:12px;margin-right:5px;border:1px solid #444;vertical-align:-2px}
+.tree::before{background:#2e8b57}.fire::before{background:#ff5a36}.burned::before{background:#2a2a2a}.empty::before{background:#d9c59a}.break::before{background:#87c8ff}
+#chart{width:100%;height:260px;border:1px solid #ccc;background:#fff;margin-top:12px}
+.small{color:#555;font-size:13px}
+@media(max-width:1000px){.layout{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<h1>Meža ugunsgrēka izplatības simulācija</h1>
+<p class="small">Šūnu automāta modelis. Katrs koks var aizdegties no degošiem kaimiņiem. Var mainīt blīvumu, aizdegšanās varbūtību, vēju, mitrumu un ugunsdrošības joslu.</p>
+
+<div class="layout">
+  <div class="panel">
+    <canvas id="forest" width="800" height="800"></canvas>
+    <div class="legend">
+      <span class="empty">Tukšs</span><span class="tree">Koks</span><span class="fire">Deg</span>
+      <span class="burned">Izdegušais</span>
+    </div>
+    <div class="buttons">
+      <button id="startBtn">Sākt / turpināt</button>
+      <button id="pauseBtn">Pauze</button>
+      <button id="stepBtn">1 solis</button>
+      <button id="resetBtn">Jauns mežs</button>
+      <button id="igniteBtn">Aizdedzināt centru</button>
+    </div>
+    <div id="stats"></div>
+  </div>
+
+  <div class="panel controls">
+    <label>Režģa izmērs: <span id="sizeVal">100×100</span></label>
+    <input id="size" type="range" min="30" max="150" step="10" value="100">
+
+    <label>Koku blīvums ρ: <span id="densityVal">0.80</span></label>
+    <input id="density" type="range" min="0.10" max="0.95" step="0.01" value="0.80">
+
+    <label>Aizdegšanās varbūtība p: <span id="pVal">0.35</span></label>
+    <input id="p" type="range" min="0.01" max="1.00" step="0.01" value="0.35">
+
+    <label>Mitrums: <span id="moistureVal">0.00</span></label>
+    <input id="moisture" type="range" min="0" max="0.90" step="0.05" value="0.00">
+	
+    <label>Vēja stiprums: <span id="windVal">0.30</span></label>
+    <input id="wind" type="range" min="0" max="1" step="0.05" value="0.30">
+
+    <label>Vēja virziens</label>
+    <select id="windDir">
+      <option value="0,-1">Ziemeļi ↑</option>
+      <option value="1,-1">Ziemeļaustrumi ↗</option>
+      <option value="1,0" selected>Austrumi →</option>
+      <option value="1,1">Dienvidaustrumi ↘</option>
+      <option value="0,1">Dienvidi ↓</option>
+      <option value="-1,1">Dienvidrietumi ↙</option>
+      <option value="-1,0">Rietumi ←</option>
+      <option value="-1,-1">Ziemeļrietumi ↖</option>
+    </select>
+
+    <label>Aizdegšanās rādiuss</label>
+    <input type="number" id="radius" value=2>
+
+    <label>Ugunsdrošības joslas platums: <span id="breakVal">0</span></label>
+    <input id="breakWidth" type="range" min="0" max="8" step="1" value="0">
+
+    <label>Joslas novietojums</label>
+    <select id="breakPos">
+      <option value="vertical" selected>Vertikāli pa vidu</option>
+      <option value="horizontal">Horizontāli pa vidu</option>
+    </select>
+
+    <label>Simulācijas ātrums (ms/solis)</label>
+    <input id="speed" type="number" min="20" max="1000" step="10" value="100">
+
+    <canvas id="chart" width="340" height="260"></canvas>
+    <div id="batchInfo" class="small"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+const EMPTY=0, TREE=1, FIRE=2, BURNED=3, FIREBREAK=4;
+const forestCanvas=document.getElementById('forest');
+const ctx=forestCanvas.getContext('2d');
+const chart=document.getElementById('chart');
+const cctx=chart.getContext('2d');
+
+let N=100, grid=[], running=false, timer=null, stepCount=0, initialTrees=0, history=[];
+
+const get = id => document.getElementById(id);
+const num = id => Number(get(id).value);
+const str = id => get(id).value;
+
+function updateLabels(){
+  get('sizeVal').textContent=`${num('size')}×${num('size')}`;
+  get('densityVal').textContent=num('density').toFixed(2);
+  get('pVal').textContent=num('p').toFixed(2);
+  get('moistureVal').textContent=num('moisture').toFixed(2);
+  get('windVal').textContent=num('wind').toFixed(2);
+  get('breakVal').textContent=num('breakWidth');
+}
+
+function countState(state){
+  let c=0;
+  for(const row of grid) for(const cell of row) if(cell===state) c++;
+  return c;
+}
+
+function applyFirebreak(){
+  const w=num('breakWidth');
+  if(w<=0) return;
+  const pos=str('breakPos');
+  const mid=Math.floor(N/2);
+  if(pos==='vertical'){
+    for(let y=0;y<N;y++){
+      for(let x=Math.max(0,mid-Math.floor(w/2));x<Math.min(N,mid+Math.ceil(w/2));x++){
+        grid[y][x]=EMPTY;
+      }
+    }
+  } else {
+    for(let y=Math.max(0,mid-Math.floor(w/2));y<Math.min(N,mid+Math.ceil(w/2));y++){
+      for(let x=0;x<N;x++) grid[y][x]=EMPTY;
+    }
+  }
+}
+
+function makeGrid(){
+  stopSimulation();
+  N=num('size');
+  const density=num('density');
+  grid=Array.from({length:N},()=>Array.from({length:N},()=>Math.random()<density?TREE:EMPTY));
+  applyFirebreak();
+  initialTrees=countState(TREE);
+  stepCount=0;
+  history=[];
+  draw();
+  updateStats();
+  drawChart();
+}
+
+function igniteCenter(){
+  const cx=Math.floor(N/4);
+  const cy=Math.floor(N/2);
+  let ignited=0;
+  for(let dy=-1;dy<=1;dy++){
+    for(let dx=-1;dx<=1;dx++){
+      const x=cx+dx,y=cy+dy;
+      if(grid[y] && grid[y][x]===TREE){
+        grid[y][x]=FIRE;
+        ignited++;
+      }
+    }
+  }
+  if(ignited===0){
+    outer:
+    for(let r=1;r<N;r++){
+      for(let y=Math.max(0,cy-r);y<=Math.min(N-1,cy+r);y++){
+        for(let x=Math.max(0,cx-r);x<=Math.min(N-1,cx+r);x++){
+          if(grid[y][x]===TREE){
+            grid[y][x]=FIRE;
+            break outer;
+          }
+        }
+      }
+    }
+  }
+  draw();
+  updateStats();
+}
+
+function windFactor(dx,dy){
+  const [wx,wy]=str('windDir').split(',').map(Number);
+  const mag=Math.hypot(dx,dy);
+  const wmag=Math.hypot(wx,wy);
+  if(mag===0 || wmag===0) return 1;
+  const dot=(dx*wx+dy*wy)/(mag*wmag);
+  const strength=num('wind');
+  return Math.max(0.05,1 + 0.9*strength*dot);
+}
+
+function stepOnce(silent=false){
+  const p=num('p');
+  const moisture=num('moisture'); //problema te todo
+  const radius=num('radius');
+  const next=grid.map(r=>r.slice());
+
+  for(let y=0;y<N;y++){
+    for(let x=0;x<N;x++){
+      if(grid[y][x]===FIRE) next[y][x]=BURNED;
+    }
+  }
+
+  for(let y=0;y<N;y++){
+    for(let x=0;x<N;x++){
+      if(grid[y][x]!==TREE) continue;
+
+      let survival=1;
+	  
+	  
+	  
+      for(let dy=-radius;dy<=radius;dy++){
+        for(let dx=-radius;dx<=radius;dx++){
+          if(dx===0 && dy===0) continue;
+		  
+		  
+          const nx=x-dx, ny=y-dy;
+		  if(nx<0 || ny<0 || nx>=N || ny>=N) continue;
+          if(grid[ny][nx]!==FIRE) continue;
+
+
+			
+
+			let karstums=1;
+		  for (let dr = -1; dr <= 1; dr++) {
+
+			 for (let dc = -1; dc <= 1; dc++) {
+			  if (dr === 0 && dc === 0) {
+                    continue;
+                }
+				const nr = nx + dr;
+
+                const nc = ny + dc;
+				if (!(nr<0 || nc<0 || nr>=N || nc>=N)){
+					if(grid[nc][nr]==FIRE){
+						karstums++;
+					}
+				}
+			 }
+		 }
+		 
+		 
+          const dist=Math.hypot(dx,dy);
+          let localP=(1-moisture)*windFactor(dx,dy)*(1-Math.pow((1-p), karstums));//*p;
+		  if(dist>1) localP/=Math.pow(5, dist-1);
+          //else if(dist>=1.5) localP*=0.1;
+		  
+          //else if(dx!==0 && dy!==0) localP*=0.75;
+          localP=Math.max(0,Math.min(1,localP));
+          survival*=1-localP;
+        }
+      }
+
+      const igniteP=1-survival;
+      if(Math.random()<igniteP) next[y][x]=FIRE;
+    }
+  }
+
+  grid=next;
+  stepCount++;
+  const burned=countState(BURNED), fires=countState(FIRE);
+  history.push({step:stepCount,burned:burned+fires});
+
+  if(!silent){
+    draw();
+    updateStats();
+    drawChart();
+  }
+  return fires>0;
+}
+
+function draw(){
+  const cell=forestCanvas.width/N;
+  ctx.clearRect(0,0,forestCanvas.width,forestCanvas.height);
+  for(let y=0;y<N;y++){
+    for(let x=0;x<N;x++){
+      const v=grid[y][x];
+      ctx.fillStyle =
+        v===EMPTY ? '#d9c59a' :
+        v===TREE ? '#2e8b57' :
+        v===FIRE ? '#ff5a36' :
+        v===BURNED ? '#2a2a2a' : '#87c8ff';
+      ctx.fillRect(x*cell,y*cell,Math.ceil(cell),Math.ceil(cell));
+    }
+  }
+}
+
+function updateStats(){
+  const trees=countState(TREE), fires=countState(FIRE), burned=countState(BURNED);
+  const burnedPct=initialTrees?100*burned/initialTrees:0;
+  get('stats').innerHTML=
+    `<div class="stat"><b>Solis:</b> ${stepCount}</div>
+     <div class="stat"><b>Dzīvi koki:</b> ${trees} &nbsp; <b>Deg:</b> ${fires} &nbsp; <b>Izdeguši:</b> ${burned}</div>
+     <div class="stat"><b>Izdegusī sākotnējā meža daļa:</b> ${burnedPct.toFixed(1)}%</div>`;
+}
+
+function drawChart(){
+  cctx.clearRect(0,0,chart.width,chart.height);
+  cctx.fillStyle='#fff';
+  cctx.fillRect(0,0,chart.width,chart.height);
+  cctx.strokeStyle='#999';
+  cctx.strokeRect(35,10,chart.width-45,chart.height-40);
+  cctx.fillStyle='#222';
+  cctx.font='12px Arial';
+  cctx.fillText('Izdegušo koku skaits',40,22);
+  cctx.fillText('soļi',chart.width-35,chart.height-8);
+
+  if(history.length<2) return;
+
+  const maxY=Math.max(initialTrees,1);
+  const maxX=Math.max(history[history.length-1].step,1);
+
+  cctx.beginPath();
+  history.forEach((d,i)=>{
+    const x=35+(chart.width-45)*d.step/maxX;
+    const y=10+(chart.height-40)*(1-d.burned/maxY);
+    if(i===0) cctx.moveTo(x,y); else cctx.lineTo(x,y);
+  });
+  cctx.strokeStyle='#333';
+  cctx.lineWidth=2;
+  cctx.stroke();
+}
+
+function startSimulation(){
+  if(running) return;
+  //if(countState(FIRE)===0) igniteCenter();
+  running=true;
+  get('startBtn').disabled=true;
+  const interval=Math.max(20,num('speed'));
+  timer=setInterval(()=>{
+    const stillBurning=stepOnce(false);
+    if(!stillBurning) stopSimulation();
+  },interval);
+}
+
+function stopSimulation(){
+  running=false;
+  get('startBtn').disabled=false;
+  if(timer!==null){
+    clearInterval(timer);
+    timer=null;
+  }
+}
+
+async function batchRun(){
+  stopSimulation();
+  const runs=100;
+  const results=[];
+  get('batchInfo').textContent='Notiek 100 simulācijas...';
+
+  for(let r=0;r<runs;r++){
+    N=num('size');
+    const density=num('density');
+    grid=Array.from({length:N},()=>Array.from({length:N},()=>Math.random()<density?TREE:EMPTY));
+    applyFirebreak();
+    initialTrees=countState(TREE);
+    stepCount=0;
+    history=[];
+    igniteCenter();
+
+    let guard=0;
+    while(countState(FIRE)>0 && guard<1000){
+      stepOnce(true);
+      guard++;
+    }
+    results.push(countState(BURNED)/(initialTrees||1));
+
+    if(r%10===0) await new Promise(resolve=>setTimeout(resolve,0));
+  }
+
+  const avg=results.reduce((a,b)=>a+b,0)/runs;
+  const min=Math.min(...results), max=Math.max(...results);
+  get('batchInfo').innerHTML=
+    `<b>100 simulāciju rezultāts:</b><br>
+     Vidēji izdega ${(100*avg).toFixed(1)}% meža;<br>
+     minimums ${(100*min).toFixed(1)}%, maksimums ${(100*max).toFixed(1)}%.`;
+
+  makeGrid();
+  igniteCenter();
+}
+
+forestCanvas.addEventListener('click',e=>{
+  const rect=forestCanvas.getBoundingClientRect();
+  const x=Math.floor((e.clientX-rect.left)/rect.width*N);
+  const y=Math.floor((e.clientY-rect.top)/rect.height*N);
+  if(grid[y] && grid[y][x]===TREE){
+    grid[y][x]=FIRE;
+    draw();
+    updateStats();
+  }
+});
+
+['size','density','p','moisture','wind','breakWidth'].forEach(id=>{
+  get(id).addEventListener('input',updateLabels);
+});
+
+get('startBtn').addEventListener('click',startSimulation);
+get('pauseBtn').addEventListener('click',stopSimulation);
+get('stepBtn').addEventListener('click',()=>{
+  stopSimulation();
+  if(countState(FIRE)===0) igniteCenter();
+  stepOnce(false);
+});
+get('resetBtn').addEventListener('click',()=>{
+  makeGrid();
+  //igniteCenter();
+});
+get('igniteBtn').addEventListener('click',igniteCenter);
+get('batchBtn').addEventListener('click',batchRun);
+
+get('breakWidth').addEventListener('change',()=>{makeGrid();igniteCenter();});
+get('breakPos').addEventListener('change',()=>{makeGrid();igniteCenter();});
+get('size').addEventListener('change',()=>{makeGrid();igniteCenter();});
+get('density').addEventListener('change',()=>{makeGrid();igniteCenter();});
+
+updateLabels();
+makeGrid();
+//igniteCenter();
+})();
+</script>
+</body>
+</html>
